@@ -1,3 +1,28 @@
+# k8s/mlserver/mlserver.yaml
+# ---------------------------------------------------------------------------
+# PURPOSE: Deploy the MLServer + MLflow tracking UI into the `mlserver`
+#          namespace.  This pod serves two functions:
+#
+#   Port 8080 — MLServer: Seldon's lightweight model-serving runtime.
+#     Exposes the V2 Inference Protocol so you can POST predictions to:
+#     http://mlserver-service.mlserver.svc.cluster.local:8080/v2/models/best-model/infer
+#
+#   Port 5000 — MLflow UI: Web dashboard to inspect experiment runs,
+#     compare model metrics, and browse logged artefacts.
+#     Access locally via:
+#       kubectl -n mlserver port-forward svc/mlserver-service 5000:5000
+#       Then open http://localhost:5000
+#
+# DEPLOY: kubectl apply -f k8s/mlserver/mlserver.yaml
+#
+# NOTE: The FastAPI service (port 8000) is the primary inference endpoint
+#   used by this pipeline.  MLServer (port 8080) is an alternative model
+#   server and is not called directly in the automated drift/retrain loop.
+#
+# ⚠️  SECURITY: Credentials are plain text for demo purposes.
+#   Use Kubernetes Secrets with secretKeyRef in production.
+# ---------------------------------------------------------------------------
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,23 +39,31 @@ spec:
         app: mlserver
     spec:
       imagePullSecrets:
-      - name: docker-registry-creds 
+      - name: docker-registry-creds  # Secret to pull from private Docker Hub repo
       containers:
       - name: mlserver
-        image: measureapp/mlserver:0.0.2
+        image: measureapp/mlserver:0.0.2  # Built from docker/mlserver/Dockerfile
         ports:
-        - containerPort: 8080
-        - containerPort: 5000
+        - containerPort: 8080  # MLServer V2 API
+        - containerPort: 5000  # MLflow tracking UI
         env:
+        # Logical model name used by MLServer to route inference requests
         - name: MODEL_NAME
           value: "best-model"
+        # URI where MLServer fetches the model artefacts from MinIO
         - name: MODEL_URI
           value: "http://localhost:9000/models/best_model/"
+        # ⚠️  DEMO ONLY — use secretKeyRef in production
         - name: AWS_ACCESS_KEY_ID
           value: "qgJC73MaeLiIsNx1hBWE"
         - name: AWS_SECRET_ACCESS_KEY
           value: "rP8zK6AUFvB5Y0LtxUQEPmgSGFHXT2shgCkap1Y0"
 ---
+---
+# ClusterIP Service — reachable only within the cluster.
+# In-cluster DNS: mlserver-service.mlserver.svc.cluster.local
+# - model_training.py sets MLFLOW_TRACKING_URI to point here (port 5000)
+# - kubectl port-forward can expose either port locally for debugging
 apiVersion: v1
 kind: Service
 metadata:
@@ -40,12 +73,12 @@ spec:
   selector:
     app: mlserver
   ports:
-    - name: http-model-api  # Add a name for the first port
+    - name: http-model-api   # MLServer V2 Inference Protocol
       protocol: TCP
-      port: 8080       # Service port for model API
-      targetPort: 8080 # Container port for model API
-    - name: http-ui  # Add a name for the second port
+      port: 8080
+      targetPort: 8080
+    - name: http-ui          # MLflow experiment tracking UI
       protocol: TCP
-      port: 5000       # Service port for additional API or UI
-      targetPort: 5000 # Container port for additional API or UI
-  type: ClusterIP
+      port: 5000
+      targetPort: 5000
+  type: ClusterIP  # Internal only; use port-forward for local browser access

@@ -1,10 +1,33 @@
+# k8s/api/fastapi-depl.yaml
+# ---------------------------------------------------------------------------
+# PURPOSE: Deploy the Churn Prediction FastAPI service into the `fastapi`
+#          namespace.  This service:
+#            - Loads model.pkl from MinIO on startup.
+#            - Serves predictions at POST /api/predict/.
+#            - Exposes drift detection at POST /detect-drift.
+#            - Exposes Prometheus metrics at GET /metrics.
+#            - Hot-reloads the model at POST /reload-model (called by Argo).
+#
+# DEPLOY:  kubectl apply -f k8s/api/fastapi-depl.yaml
+# TEST (local port-forward):
+#   kubectl -n fastapi port-forward svc/fastapi-service 8000:80
+#   Then open http://localhost:8000/docs
+#
+# ⚠️  SECURITY: AWS credentials are in plain text here for demo purposes.
+#   Replace with Kubernetes Secrets:
+#     kubectl create secret generic minio-creds \
+#       --from-literal=AWS_ACCESS_KEY_ID=<key> \
+#       --from-literal=AWS_SECRET_ACCESS_KEY=<secret> -n fastapi
+#   Then reference them with secretKeyRef instead of value:.
+# ---------------------------------------------------------------------------
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: fastapi-deployment
   namespace: fastapi
 spec:
-  replicas: 1
+  replicas: 1   # Scale up for high availability; add HPA for auto-scaling
   selector:
     matchLabels:
       app: fastapi
@@ -13,40 +36,56 @@ spec:
       labels:
         app: fastapi
     spec:
+      # docker-registry-creds is a K8s Secret of type docker-registry
+      # that allows the kubelet to pull private images from Docker Hub.
+      # Create it with:
+      #   kubectl create secret docker-registry docker-registry-creds \
+      #     --docker-username=<user> --docker-password=<token> -n fastapi
       imagePullSecrets:
-      - name: docker-registry-creds 
+      - name: docker-registry-creds
       containers:
         - name: fastapi-container
-          image: measureapp/demo_ai_api:0.0.40
+          image: measureapp/demo_ai_api:0.0.40  # Bump version tag after rebuilding
           ports:
-            - containerPort: 8000
+            - containerPort: 8000  # Uvicorn listens on this port inside the container
           env:
+            # Path inside the container where model.pkl will be downloaded/loaded.
             - name: BEST_MODEL_PATH
               value: "/app/models/best_model/model.pkl"
+            # In-cluster DNS for MinIO Service (minio namespace).
             - name: MINIO_URL
               value: "http://minio-service.minio.svc.cluster.local:9000"
+            # ⚠️  DEMO ONLY — use secretKeyRef in production
             - name: AWS_ACCESS_KEY_ID
               value: "qgJC73MaeLiIsNx1hBWE"
             - name: AWS_SECRET_ACCESS_KEY
               value: "rP8zK6AUFvB5Y0LtxUQEPmgSGFHXT2shgCkap1Y0"
           volumeMounts:
+            # The model volume is mounted at /app/models so model.pkl can
+            # be written there at startup and persisted within the pod's
+            # lifecycle (shared across container restarts within the pod).
             - name: model-volume
               mountPath: "/app/models"
       volumes:
+        # emptyDir lives as long as the pod.  When the pod is deleted or
+        # rescheduled, the model is re-downloaded from MinIO on next startup.
         - name: model-volume
           emptyDir: {}
 
 ---
+# ClusterIP Service makes FastAPI reachable by other pods within the cluster
+# (e.g. the drift CronJob calls http://fastapi-service.fastapi.svc.cluster.local/detect-drift).
+# Use `kubectl port-forward` to access it from your local machine.
 apiVersion: v1
 kind: Service
 metadata:
-  name: fastapi-service
+  name: fastapi-service   # DNS: fastapi-service.fastapi.svc.cluster.local
   namespace: fastapi
 spec:
   selector:
     app: fastapi
   ports:
     - protocol: TCP
-      port: 80
-      targetPort: 8000
-  type: ClusterIP
+      port: 80         # External-facing port within the cluster
+      targetPort: 8000 # Maps to Uvicorn's listening port inside the container
+  type: ClusterIP      # Not exposed outside the cluster; use port-forward for local access

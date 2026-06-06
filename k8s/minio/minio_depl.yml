@@ -1,10 +1,31 @@
+# k8s/minio/minio_depl.yml
+# ---------------------------------------------------------------------------
+# PURPOSE: Deploy MinIO — an S3-compatible object storage server — inside
+#          the Kubernetes cluster.  MinIO is used to store:
+#            - Processed dataset splits (bucket: data)
+#            - Trained model artefact model.pkl (bucket: models)
+#            - Reference data snapshot for drift detection (bucket: models)
+#
+# DEPLOY:  kubectl apply -f k8s/minio/minio_depl.yml
+# ACCESS (local port-forward):
+#   kubectl -n minio port-forward svc/minio-service 9000:9000 9001:9001
+#   Then open http://localhost:9001 (MinIO Console UI).
+#   Login: minioadmin / minioadmin
+#
+# ⚠️  SECURITY: Credentials are plain-text for demo purposes.
+#   In production use Kubernetes Secrets:
+#     kubectl create secret generic minio-creds \
+#       --from-literal=MINIO_ROOT_USER=<user> \
+#       --from-literal=MINIO_ROOT_PASSWORD=<password> -n minio
+# ---------------------------------------------------------------------------
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: minio-depl
-  namespace: minio
+  namespace: minio   # Isolated namespace keeps MinIO resources separate
 spec:
-  replicas: 1
+  replicas: 1   # Single instance is fine for dev/demo; use distributed mode for HA
   selector:
     matchLabels:
       app: minio
@@ -17,44 +38,50 @@ spec:
         - name: minio
           image: minio/minio:latest
           args:
-            - server
-            - --console-address
+            - server                # Run MinIO in server mode
+            - --console-address     # Bind the web console to a specific port
             - ":9001"
-            - /data
+            - /data                 # Data directory inside the container
           env:
+            # ⚠️  DEMO ONLY — replace with a Secret reference in production
             - name: MINIO_ROOT_USER
               value: "minioadmin"
             - name: MINIO_ROOT_PASSWORD
               value: "minioadmin"
           ports:
-            - containerPort: 9000
-            - containerPort: 9001
+            - containerPort: 9000  # S3 API endpoint (boto3 connects here)
+            - containerPort: 9001  # MinIO web console
           volumeMounts:
             - name: minio-storage
-              mountPath: "/data"
+              mountPath: "/data"   # Where MinIO stores bucket data inside the container
       volumes:
+        # emptyDir is ephemeral — data is lost if the pod restarts.
+        # For persistent storage replace with a PersistentVolumeClaim.
         - name: minio-storage
           emptyDir: {}
 
 ---
+# Service exposes MinIO outside the cluster via NodePort so you can access
+# it on http://localhost:32000 (S3 API) and http://localhost:32001 (console)
+# when using kind with the extraPortMappings defined in kind-config.yaml.
 apiVersion: v1
 kind: Service
 metadata:
-  name: minio-service
-  namespace: minio
+  name: minio-service   # This DNS name is used by all in-cluster pods:
+  namespace: minio      #   http://minio-service.minio.svc.cluster.local:9000
 spec:
   selector:
     app: minio
   ports:
     - name: minio
-      nodePort: 32000  # NodePort for MinIO (adjust if needed)
-      port: 9000       # Service port
+      nodePort: 32000  # Accessible on the host at http://localhost:32000
+      port: 9000       # Service cluster-internal port (what pods connect to)
       protocol: TCP
-      targetPort: 9000 # MinIO application port
+      targetPort: 9000 # Container port MinIO listens on for S3 API calls
     - name: minio-console
-      nodePort: 32001  # NodePort for MinIO console (adjust if needed)
-      port: 9001       # Service port
+      nodePort: 32001  # Accessible on the host at http://localhost:32001
+      port: 9001       # Service cluster-internal port
       protocol: TCP
-      targetPort: 9001 # MinIO console port
-  type: NodePort
+      targetPort: 9001 # Container port for the MinIO web console
+  type: NodePort       # Exposes the service on each node's IP at a static port
 

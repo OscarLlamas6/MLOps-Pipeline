@@ -1,11 +1,42 @@
+# k8s/argo/workflow-template.yaml
+# ---------------------------------------------------------------------------
+# PURPOSE: Defines the Argo WorkflowTemplate that executes the automated
+#          retraining pipeline whenever data drift is detected.
+#
+# TRIGGER CHAIN (end-to-end):
+#   1. CronJob (drift-job.yaml)       → POST /detect-drift
+#   2. FastAPI                        → Evidently detects drift_score > 0.3
+#   3. FastAPI                        → POST to Argo Events webhook (port 12000)
+#   4. EventSource (webhook-eventsource.yaml) → Argo event published
+#   5. Sensor (drift-detection-sensor.yaml)   → Submits this WorkflowTemplate
+#   6. Step 1: retrain-model container        → runs retrain_model.py
+#   7. Step 2: notify-reload container        → POST /reload-model to FastAPI
+#
+# DEPLOY:  kubectl apply -f k8s/argo/workflow-template.yaml
+# MONITOR: Argo Workflows UI at https://localhost:2746
+#          kubectl get workflows -n argo-events
+#
+# LEARNING NOTES:
+#   - WorkflowTemplate is a reusable template; the Sensor submits a Workflow
+#     that references it via workflowTemplateRef.  This means you can update
+#     the template without touching the Sensor or EventSource.
+#   - `steps` in Argo are sequential stages (each [[]] array is one stage).
+#     Two dashes (- -) before a step means it runs after the previous stage.
+#   - {{inputs.parameters.xxx}} is Argo's templating syntax for passing
+#     parameters between workflow steps at runtime.
+# ---------------------------------------------------------------------------
+
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
   name: drift-retrain-template
   namespace: argo-events
 spec:
-  entrypoint: retrain-workflow
-  serviceAccountName: default
+  entrypoint: retrain-workflow          # Name of the entry-point template
+  serviceAccountName: default           # Must have permission to create pods
+
+  # Default parameter values — can be overridden when the Sensor submits
+  # a Workflow instance referencing this template.
   arguments:
     parameters:
     - name: data-dir
@@ -14,12 +45,17 @@ spec:
       value: "s3://minio/models/best_model"
 
   templates:
+
+  # ---------------------------------------------------------------- #
+  # TOP-LEVEL DAG: two sequential stages                              #
+  # ---------------------------------------------------------------- #
   - name: retrain-workflow
     inputs:
       parameters:
       - name: data-dir
       - name: model-dir
     steps:
+    # Stage 1: run the retraining script inside the ml_job container
     - - name: retrain-model
         template: retrain-model
         arguments:
@@ -28,24 +64,34 @@ spec:
             value: "{{inputs.parameters.data-dir}}"
           - name: model-dir
             value: "{{inputs.parameters.model-dir}}"
+    # Stage 2: only runs AFTER Stage 1 completes successfully.
+    # Sends a POST to FastAPI's /reload-model to hot-swap the model
+    # in memory without restarting the pod.
     - - name: notify-reload
         template: notify-reload
 
+  # ---------------------------------------------------------------- #
+  # TEMPLATE: retrain-model                                           #
+  # Runs retrain_model.py which downloads data from MinIO, detects    #
+  # drift, retrains if needed, and re-uploads the new model.pkl.      #
+  # ---------------------------------------------------------------- #
   - name: retrain-model
     inputs:
       parameters:
       - name: data-dir
       - name: model-dir
     container:
-      image: measureapp/ml_job:0.0.26
-      imagePullPolicy: Always
+      image: measureapp/ml_job:0.0.26   # Built from docker/model/Dockerfile
+      imagePullPolicy: Always           # Always pull to ensure latest retrain image
       command: ["/bin/bash", "-c"]
       args:
         - |
           python /app/scripts/retrain_model.py
       env:
+      # In-cluster MinIO URL
       - name: MINIO_URL
         value: "http://minio-service.minio.svc.cluster.local:9000"
+      # ⚠️  DEMO ONLY — use Kubernetes Secrets in production
       - name: AWS_ACCESS_KEY_ID
         value: "qgJC73MaeLiIsNx1hBWE"
       - name: AWS_SECRET_ACCESS_KEY
@@ -53,16 +99,24 @@ spec:
       imagePullSecrets:
       - name: docker-registry-creds
 
+  # ---------------------------------------------------------------- #
+  # TEMPLATE: notify-reload                                           #
+  # Sends a POST to FastAPI /reload-model.  FastAPI will download      #
+  # the newly trained model.pkl from MinIO and swap it in-memory.     #
+  # ---------------------------------------------------------------- #
   - name: notify-reload
     inputs:
       parameters:
       - name: url
         value: "http://fastapi-service.fastapi.svc.cluster.local/reload-model"
     container:
-      image: curlimages/curl:latest
+      image: curlimages/curl:latest  # Minimal image — only curl is needed
       command: ["sh", "-c"]
       args:
         - |
+          # POST a JSON payload to FastAPI's reload endpoint.
+          # {{workflow.creationTimestamp}} is an Argo built-in variable
+          # that records when this Workflow instance was created.
           curl -X POST \
             -H "Content-Type: application/json" \
             -d '{"message": "Reload model after retrain", "timestamp": "{{workflow.creationTimestamp}}"}' \

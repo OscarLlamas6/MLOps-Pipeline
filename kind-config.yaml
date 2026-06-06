@@ -1,15 +1,45 @@
+# kind-config.yaml
+# ---------------------------------------------------------------------------
+# PURPOSE: Configuration file for creating a local Kubernetes cluster with
+#          kind (Kubernetes IN Docker).  kind runs each K8s node as a Docker
+#          container, making it ideal for local MLOps development and testing
+#          without needing a cloud provider.
+#
+# USAGE:
+#   kind create cluster --name mlops-demo --config kind-config.yaml
+#
+# LEARNING NOTES:
+#   - kind clusters are ephemeral — ideal for development but not for production.
+#   - The control-plane node runs the K8s API server, scheduler, and
+#     controller-manager.
+#   - The worker node runs the actual workloads (pods).
+#   - extraPortMappings expose container ports on the host machine, making
+#     it possible to reach services deployed inside the cluster from your
+#     browser or terminal without a cloud LoadBalancer.
+# ---------------------------------------------------------------------------
+
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
+
 nodes:
-- role: control-plane
-- role: worker
-  extraPortMappings:
-  - containerPort: 80 # Kind node is listening on
-    hostPort: 80 # Targets the cluster
-  - containerPort: 443
-    hostPort: 443
-  - containerPort: 2222
-    hostPort: 2222
+  # Control-plane node: runs the K8s API server, etcd, scheduler.
+  # No port mappings needed here — management is done via kubectl.
+  - role: control-plane
+
+  # Worker node: runs application pods.
+  # extraPortMappings forward host ports → node ports so you can reach
+  # NodePort services (e.g. MinIO on 32000/32001) directly from localhost.
+  - role: worker
+    extraPortMappings:
+      - containerPort: 80   # Maps host:80  → node:80  (HTTP Ingress)
+        hostPort: 80
+      - containerPort: 443  # Maps host:443 → node:443 (HTTPS Ingress)
+        hostPort: 443
+      - containerPort: 2222 # Maps host:2222 → node:2222 (optional SSH / git)
+        hostPort: 2222
+
+# Optional: switch to Calico as the CNI plugin for network policy support.
+# Uncomment and set disableDefaultCNI: true if you need NetworkPolicy objects.
 # networking:
 #   disableDefaultCNI: true
 #   podSubnet: 192.168.0.0/16 # set to Calico's default subnet

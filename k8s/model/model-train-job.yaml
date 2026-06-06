@@ -1,3 +1,28 @@
+# k8s/model/model-train-job.yaml
+# ---------------------------------------------------------------------------
+# PURPOSE: Kubernetes Job that runs the initial (or manual) full training
+#          pipeline inside the cluster:
+#            1. run_data_preparation.py  — clean, split, upload to MinIO
+#            2. model_training.py        — train RF + XGBoost, log to MLflow
+#            3. evaluate_model.py        — compute AUC, generate drift report
+#
+# DEPLOY:  kubectl apply -f k8s/model/model-train-job.yaml
+# MONITOR: kubectl get jobs -n mlflow
+#          kubectl logs -n mlflow job/train-retrain-job -f
+#
+# DIFFERENCE FROM RETRAIN:
+#   This Job runs the full pipeline from scratch (starting with raw data).
+#   The Argo WorkflowTemplate (k8s/argo/workflow-template.yaml) runs only
+#   retrain_model.py which downloads existing processed data from MinIO.
+#
+# LEARNING NOTES:
+#   - restartPolicy: Never means if the Job fails Kubernetes does NOT retry.
+#     Set to OnFailure if you want automatic retries.
+#   - The Job is one-shot: once complete it stays in Completed state until
+#     you manually delete it.  Use `kubectl delete job train-retrain-job -n mlflow`
+#     before re-applying if you want to run it again.
+# ---------------------------------------------------------------------------
+
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -7,23 +32,32 @@ spec:
   template:
     spec:
       imagePullSecrets:
-      - name: docker-registry-creds 
+      - name: docker-registry-creds  # Secret for pulling from private Docker Hub repo
       containers:
         - name: train-retrain-container
-          image: measureapp/ml_job:0.0.26
+          image: measureapp/ml_job:0.0.26  # Built from docker/model/Dockerfile
           command: ["/bin/bash", "-c"]
           args:
             - |
-              python /app/scripts/run_data_preparation.py --data-path /app/data/raw/telco_churn.csv --config-path /app/config/process.yaml --output-dir /app/data/processed &&
+              # Stage 1: preprocess raw CSV and upload splits to MinIO
+              python /app/scripts/run_data_preparation.py \
+                --data-path /app/data/raw/telco_churn.csv \
+                --config-path /app/config/process.yaml \
+                --output-dir /app/data/processed &&
+              # Stage 2: train RandomForest + XGBoost, log to MLflow, upload best model
               python /app/scripts/model_training.py &&
+              # Stage 3: evaluate the best model and generate drift baseline report
               python /app/scripts/evaluate_model.py;
           env:
+            # ⚠️  DEMO ONLY — use secretKeyRef in production
             - name: AWS_ACCESS_KEY_ID
               value: "qgJC73MaeLiIsNx1hBWE"
             - name: AWS_SECRET_ACCESS_KEY
               value: "rP8zK6AUFvB5Y0LtxUQEPmgSGFHXT2shgCkap1Y0"
+            # MLflow tracking URI — points to the mlserver Service in the mlserver namespace
             - name: MLFLOW_TRACKING_URI
               value: "http://mlserver-service.mlserver.svc.cluster.local:5000"
+            # MinIO URL — points to the minio Service in the minio namespace
             - name: MINIO_URL
               value: "http://minio-service.minio.svc.cluster.local:9000"
-      restartPolicy: Never
+      restartPolicy: Never  # Job does not auto-retry on failure

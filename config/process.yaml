@@ -1,18 +1,41 @@
+# config/process.yaml
+# ---------------------------------------------------------------------------
+# PURPOSE: Centralised preprocessing configuration for the Telco Churn
+#          dataset.  Read by data_preparation.py and model_training.py.
+#
+# LEARNING NOTE:
+#   Externalising feature lists and split ratios to YAML (instead of
+#   hard-coding them in Python) is a DataOps best practice.  It lets you
+#   change the feature set or split strategy without touching code, and
+#   version-control configuration changes separately from logic changes.
+# ---------------------------------------------------------------------------
+
 preprocessing:
+
+  # Columns passed through StandardScaler (mean=0, std=1 normalisation).
+  # These are continuous numeric values where scale matters.
   numeric_features:
-    - tenure
-    - MonthlyCharges
-    - TotalCharges
+    - tenure           # months the customer has been with the company (0–72)
+    - MonthlyCharges   # USD amount billed each month
+    - TotalCharges     # USD cumulative amount billed (often correlated with tenure)
+
+  # Columns encoded with OneHotEncoder (each unique value becomes a binary column).
+  # Note: Tenure_Bin is engineered in data_preparation.py from the `tenure` column.
   categorical_features:
-    - gender
-    - Partner
-    - Dependents
-    - PhoneService
-    - InternetService
-    - Contract
-    - PaymentMethod
-    - Tenure_Bin
+    - gender           # Male / Female
+    - Partner          # Yes / No
+    - Dependents       # Yes / No
+    - PhoneService     # Yes / No
+    - InternetService  # DSL / Fiber optic / No
+    - Contract         # Month-to-month / One year / Two year
+    - PaymentMethod    # Electronic check / Mailed check / Bank transfer / Credit card
+    - Tenure_Bin       # Engineered bin: 0-1 yr / 1-2 yrs / ... / 5-6 yrs
+
+  # Binary classification target: "Yes" → 1 (churned), "No" → 0 (retained).
   target_column: Churn
+
+  # Controls sklearn's train_test_split (first split: train vs. temp).
+  # Final proportions after the second split: 70% train | 15% val | 15% test.
   train_test_split:
-    test_size: 0.3
-    random_state: 42
+    test_size: 0.3     # 30% held out for validation + test combined
+    random_state: 42   # fixed seed for reproducible splits across runs

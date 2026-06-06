@@ -1,18 +1,46 @@
-# webhook-eventsource.yaml
+# k8s/argo/webhook-eventsource.yaml
+# ---------------------------------------------------------------------------
+# PURPOSE: Argo Events EventSource that creates an HTTP webhook server
+#          inside the cluster.  When FastAPI detects drift it POSTs to this
+#          webhook, which publishes an Argo event that the Sensor consumes.
+#
+# HOW IT WORKS:
+#   Argo Events creates a Service (drift-detection-eventsource-svc) that
+#   exposes port 12000.  Any HTTP POST to /drift-detected on that Service
+#   is converted into an internal Argo event on the `drift` channel.
+#   The Sensor (drift-detection-sensor.yaml) watches for that event and
+#   submits the retraining WorkflowTemplate.
+#
+# FULL WEBHOOK URL (in-cluster):
+#   http://drift-detection-eventsource-svc.argo-events.svc.cluster.local:12000/drift-detected
+#
+# TEST MANUALLY:
+#   kubectl -n argo-events port-forward svc/drift-detection-eventsource-svc 12000:12000
+#   curl -X POST http://localhost:12000/drift-detected -d '{"test": true}'
+#
+# DEPLOY: kubectl apply -f k8s/argo/webhook-eventsource.yaml
+# CHECK:  kubectl get eventsources -n argo-events
+# ---------------------------------------------------------------------------
+
 apiVersion: argoproj.io/v1alpha1
 kind: EventSource
 metadata:
-  name: drift-detection
+  name: drift-detection      # The Sensor references this name via eventSourceName
   namespace: argo-events
 spec:
+  # Argo Events auto-creates a Kubernetes Service for this EventSource.
+  # The ports here define what that Service exposes.
   service:
     ports:
       - port: 12000
         targetPort: 12000
+
+  # webhook defines one or more HTTP endpoints this EventSource listens on.
+  # Each key (here: `drift`) becomes the `eventName` that Sensors subscribe to.
   webhook:
     drift:
-      port: "12000"
-      endpoint: /drift-detected
-      method: POST
+      port: "12000"          # Must match the service port above
+      endpoint: /drift-detected  # URL path FastAPI POSTs to when drift is detected
+      method: POST           # Only POST requests trigger the event
 
   

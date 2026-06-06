@@ -1,3 +1,20 @@
+# k8s/argo/test/test.yaml
+# ---------------------------------------------------------------------------
+# PURPOSE: Diagnostic / smoke-test pod used during initial cluster setup
+#          to verify that:
+#   1. The docker-registry-creds Secret can pull private images from Docker Hub.
+#   2. The ml_job image is accessible from the argo-events namespace.
+#   3. MinIO is reachable via its in-cluster Service DNS name.
+#
+# USAGE:
+#   kubectl apply -f k8s/argo/test/test.yaml
+#   kubectl logs -n argo-events test-image-pull
+#   kubectl delete pod test-image-pull -n argo-events  # clean up after testing
+#
+# NOTE: This is a one-off debug pod, NOT part of the production pipeline.
+#   Credentials shown here are test-only and should be rotated after use.
+# ---------------------------------------------------------------------------
+
 apiVersion: v1
 kind: Pod
 metadata:
@@ -6,13 +23,14 @@ metadata:
 spec:
   containers:
   - name: test
-    image: measureapp/ml_job:0.0.13
+    image: measureapp/ml_job:0.0.13  # Older version used for image-pull verification
     env:
     - name: MINIO_URL
       value: "http://minio-service.minio.svc.cluster.local:9000"
+    # ⚠️  Test-only credentials — rotate after smoke testing
     - name: AWS_ACCESS_KEY_ID
       value: "uaTJ6O0revHeQi0hcuXk"
     - name: AWS_SECRET_ACCESS_KEY
       value: "9PG7MDJrawCJ4MLdXYZdDbKNxZXoqwtpNhCfAkP3"
   imagePullSecrets:
-  - name: docker-registry-creds
+  - name: docker-registry-creds  # Must exist in argo-events namespace

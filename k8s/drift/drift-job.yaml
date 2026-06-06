@@ -1,23 +1,50 @@
+# k8s/drift/drift-job.yaml
+# ---------------------------------------------------------------------------
+# PURPOSE: Kubernetes CronJob that periodically triggers drift detection by
+#          calling FastAPI's POST /detect-drift endpoint.
+#
+# HOW IT WORKS:
+#   Every 10 minutes Kubernetes creates a Job which runs a single curl
+#   container.  The container makes a POST request to the FastAPI Service
+#   inside the cluster.  FastAPI runs Evidently drift detection and, if
+#   drift_score > 0.3, fires the Argo Events webhook to trigger retraining.
+#
+# DEPLOY:  kubectl apply -f k8s/drift/drift-job.yaml
+# MONITOR: kubectl get cronjobs -n mlflow
+#          kubectl get jobs -n mlflow
+#          kubectl logs -n mlflow <job-pod-name>
+#
+# LEARNING NOTES:
+#   - Using a tiny curl image (curlimages/curl) instead of a full Python
+#     image keeps the scheduled job extremely lightweight and fast to start.
+#   - The CronJob schedule follows standard cron syntax:
+#     "*/10 * * * *" = every 10 minutes, every hour, every day.
+#   - restartPolicy: OnFailure means Kubernetes retries the Job if the
+#     curl command exits with a non-zero code.
+# ---------------------------------------------------------------------------
+
 apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: drift-detection-job
-  namespace: mlflow
+  namespace: mlflow   # Runs in the mlflow namespace (adjust if preferred)
 spec:
-  schedule: "*/10 * * * *"  # Every 10 minutes
+  schedule: "*/10 * * * *"  # Cron: every 10 minutes
   jobTemplate:
     spec:
       template:
         spec:
           containers:
           - name: call-fastapi-drift-detection
-            image: curlimages/curl:latest  # Use a lightweight image for HTTP requests
+            image: curlimages/curl:latest  # Minimal image: only curl is needed
             command: ["sh", "-c"]
             args:
               - |
+                # POST to FastAPI's drift detection endpoint.
+                # FastAPI is reachable via its ClusterIP Service DNS name.
                 curl -X POST -H "Content-Type: application/json" \
                 http://fastapi-service.fastapi.svc.cluster.local/detect-drift
             env:
             - name: FASTAPI_URL
-              value: "http://fastapi-service.fastapi.svc.cluster.local"  # FastAPI service URL
-          restartPolicy: OnFailure
+              value: "http://fastapi-service.fastapi.svc.cluster.local"
+          restartPolicy: OnFailure  # Retry the Job pod if the curl call fails

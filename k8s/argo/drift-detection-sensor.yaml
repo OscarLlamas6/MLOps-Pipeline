@@ -1,3 +1,33 @@
+# k8s/argo/drift-detection-sensor.yaml
+# ---------------------------------------------------------------------------
+# PURPOSE: Argo Events Sensor that listens for events from the
+#          drift-detection EventSource and, when triggered, submits a
+#          Workflow instance referencing the drift-retrain-template.
+#
+# HOW IT FITS IN THE EVENT CHAIN:
+#   EventSource (webhook-eventsource.yaml)
+#     └─► publishes event on the `drift` channel (port 12000)
+#         Sensor (this file)
+#           └─► consumes the `drift` event
+#               └─► submits a new Workflow using drift-retrain-template
+#                     └─► Step 1: retrain_model.py runs in ml_job container
+#                           └─► Step 2: curl POSTs to FastAPI /reload-model
+#
+# DEPLOY: kubectl apply -f k8s/argo/drift-detection-sensor.yaml
+# CHECK:  kubectl get sensors -n argo-events
+#         kubectl describe sensor drift-detection-sensor -n argo-events
+#
+# LEARNING NOTES:
+#   - A Sensor can have multiple `dependencies` (event sources it listens to)
+#     and multiple `triggers` (actions it can take).  Here we have one of each.
+#   - `operate-workflow-sa` is a ServiceAccount with RBAC permissions to
+#     create Workflow objects (defined in serviceaccount/serviceaccount.yaml
+#     + a ClusterRole binding).
+#   - `generateName: drift-retrain-workflow-` creates unique workflow names
+#     like drift-retrain-workflow-x8k2p, preventing name collisions when
+#     multiple drift events fire close together.
+# ---------------------------------------------------------------------------
+
 apiVersion: argoproj.io/v1alpha1
 kind: Sensor
 metadata:
@@ -5,25 +35,36 @@ metadata:
   namespace: argo-events
 spec:
   template:
+    # ServiceAccount with permissions to submit (create) Workflow objects
     serviceAccountName: operate-workflow-sa
+
+  # The Sensor will not fire until ALL listed dependencies have received
+  # an event.  Here, just one: the `drift` event from the drift-detection
+  # EventSource (published when FastAPI POSTs to port 12000).
   dependencies:
     - name: drift-detection
-      eventSourceName: drift-detection
-      eventName: drift
+      eventSourceName: drift-detection  # Matches metadata.name in webhook-eventsource.yaml
+      eventName: drift                  # Matches the key under spec.webhook in EventSource
+
   triggers:
     - template:
         name: trigger-retrain-workflow
         argoWorkflow:
-          operation: submit
+          operation: submit  # Create (submit) a new Workflow when triggered
           source:
             resource:
               apiVersion: argoproj.io/v1alpha1
               kind: Workflow
               metadata:
+                # generateName adds a random suffix to avoid name conflicts
                 generateName: drift-retrain-workflow-
               spec:
+                # Reference the reusable WorkflowTemplate instead of
+                # embedding the full template spec here — cleaner and
+                # allows template updates without touching the Sensor.
                 workflowTemplateRef:
                   name: drift-retrain-template
+                # Pass MinIO paths as parameters to the workflow steps
                 arguments:
                   parameters:
                   - name: data-dir
